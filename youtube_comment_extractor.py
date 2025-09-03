@@ -10,22 +10,23 @@ from googleapiclient.errors import HttpError
 def get_video_comments(api_key, video_id, max_results=100):
     """
     Extracts comments from a YouTube video using the YouTube Data API.
+    Includes both top-level comments and their replies.
     
     Args:
         api_key (str): YouTube Data API key
         video_id (str): YouTube video ID
-        max_results (int): Maximum number of comments to retrieve
+        max_results (int): Maximum number of comment threads to retrieve
     
     Returns:
-        list: List of comment dictionaries
+        list: List of comment dictionaries with level information
     """
     youtube = build('youtube', 'v3', developerKey=api_key)
     comments = []
     
     try:
-        # Get video comments
+        # Get video comments with replies
         request = youtube.commentThreads().list(
-            part='snippet',
+            part='snippet,replies',
             videoId=video_id,
             maxResults=max_results,
             order='relevance'
@@ -34,35 +35,185 @@ def get_video_comments(api_key, video_id, max_results=100):
         response = request.execute()
         
         for item in response['items']:
-            comment = item['snippet']['topLevelComment']['snippet']
+            # Add top-level comment (level 0)
+            top_comment = item['snippet']['topLevelComment']['snippet']
             comments.append({
-                'author': comment['authorDisplayName'],
-                'comment': comment['textDisplay'],
-                'like_count': comment['likeCount'],
-                'published_at': comment['publishedAt'],
-                'updated_at': comment['updatedAt']
+                'level': 0,
+                'author': top_comment['authorDisplayName'],
+                'comment': top_comment['textDisplay'],
+                'like_count': top_comment['likeCount'],
+                'published_at': top_comment['publishedAt'],
+                'updated_at': top_comment['updatedAt'],
+                'parent_id': '',
+                'comment_id': item['snippet']['topLevelComment']['id']
             })
             
+            # Add replies (level 1) if they exist
+            if 'replies' in item:
+                total_reply_count = item['snippet']['totalReplyCount']
+                
+                # Add the replies that come with the commentThread
+                for reply in item['replies']['comments']:
+                    reply_snippet = reply['snippet']
+                    comments.append({
+                        'level': 1,
+                        'author': reply_snippet['authorDisplayName'],
+                        'comment': reply_snippet['textDisplay'],
+                        'like_count': reply_snippet['likeCount'],
+                        'published_at': reply_snippet['publishedAt'],
+                        'updated_at': reply_snippet['updatedAt'],
+                        'parent_id': item['snippet']['topLevelComment']['id'],
+                        'comment_id': reply['id']
+                    })
+                
+                # If there are more replies than what came with the thread, fetch them
+                if total_reply_count > len(item['replies']['comments']):
+                    try:
+                        replies_request = youtube.comments().list(
+                            part='snippet',
+                            parentId=item['snippet']['topLevelComment']['id'],
+                            maxResults=100
+                        )
+                        replies_response = replies_request.execute()
+                        
+                        # Skip the replies we already have
+                        existing_reply_ids = {r['id'] for r in item['replies']['comments']}
+                        
+                        for reply in replies_response['items']:
+                            if reply['id'] not in existing_reply_ids:
+                                reply_snippet = reply['snippet']
+                                comments.append({
+                                    'level': 1,
+                                    'author': reply_snippet['authorDisplayName'],
+                                    'comment': reply_snippet['textDisplay'],
+                                    'like_count': reply_snippet['likeCount'],
+                                    'published_at': reply_snippet['publishedAt'],
+                                    'updated_at': reply_snippet['updatedAt'],
+                                    'parent_id': item['snippet']['topLevelComment']['id'],
+                                    'comment_id': reply['id']
+                                })
+                        
+                        # Handle pagination for replies if needed
+                        while 'nextPageToken' in replies_response:
+                            replies_request = youtube.comments().list(
+                                part='snippet',
+                                parentId=item['snippet']['topLevelComment']['id'],
+                                maxResults=100,
+                                pageToken=replies_response['nextPageToken']
+                            )
+                            replies_response = replies_request.execute()
+                            
+                            for reply in replies_response['items']:
+                                reply_snippet = reply['snippet']
+                                comments.append({
+                                    'level': 1,
+                                    'author': reply_snippet['authorDisplayName'],
+                                    'comment': reply_snippet['textDisplay'],
+                                    'like_count': reply_snippet['likeCount'],
+                                    'published_at': reply_snippet['publishedAt'],
+                                    'updated_at': reply_snippet['updatedAt'],
+                                    'parent_id': item['snippet']['topLevelComment']['id'],
+                                    'comment_id': reply['id']
+                                })
+                    except HttpError as reply_error:
+                        print(f"Warning: Could not fetch all replies for comment {item['snippet']['topLevelComment']['id']}: {reply_error}")
+                        continue
+            
         # Handle pagination if there are more comments
-        while 'nextPageToken' in response and len(comments) < max_results:
+        while 'nextPageToken' in response and len([c for c in comments if c['level'] == 0]) < max_results:
             request = youtube.commentThreads().list(
-                part='snippet',
+                part='snippet,replies',
                 videoId=video_id,
-                maxResults=min(max_results - len(comments), 100),
+                maxResults=min(max_results - len([c for c in comments if c['level'] == 0]), 100),
                 order='relevance',
                 pageToken=response['nextPageToken']
             )
             response = request.execute()
             
             for item in response['items']:
-                comment = item['snippet']['topLevelComment']['snippet']
+                # Add top-level comment (level 0)
+                top_comment = item['snippet']['topLevelComment']['snippet']
                 comments.append({
-                    'author': comment['authorDisplayName'],
-                    'comment': comment['textDisplay'],
-                    'like_count': comment['likeCount'],
-                    'published_at': comment['publishedAt'],
-                    'updated_at': comment['updatedAt']
+                    'level': 0,
+                    'author': top_comment['authorDisplayName'],
+                    'comment': top_comment['textDisplay'],
+                    'like_count': top_comment['likeCount'],
+                    'published_at': top_comment['publishedAt'],
+                    'updated_at': top_comment['updatedAt'],
+                    'parent_id': '',
+                    'comment_id': item['snippet']['topLevelComment']['id']
                 })
+                
+                # Add replies (level 1) if they exist
+                if 'replies' in item:
+                    total_reply_count = item['snippet']['totalReplyCount']
+                    
+                    # Add the replies that come with the commentThread
+                    for reply in item['replies']['comments']:
+                        reply_snippet = reply['snippet']
+                        comments.append({
+                            'level': 1,
+                            'author': reply_snippet['authorDisplayName'],
+                            'comment': reply_snippet['textDisplay'],
+                            'like_count': reply_snippet['likeCount'],
+                            'published_at': reply_snippet['publishedAt'],
+                            'updated_at': reply_snippet['updatedAt'],
+                            'parent_id': item['snippet']['topLevelComment']['id'],
+                            'comment_id': reply['id']
+                        })
+                    
+                    # If there are more replies than what came with the thread, fetch them
+                    if total_reply_count > len(item['replies']['comments']):
+                        try:
+                            replies_request = youtube.comments().list(
+                                part='snippet',
+                                parentId=item['snippet']['topLevelComment']['id'],
+                                maxResults=100
+                            )
+                            replies_response = replies_request.execute()
+                            
+                            # Skip the replies we already have
+                            existing_reply_ids = {r['id'] for r in item['replies']['comments']}
+                            
+                            for reply in replies_response['items']:
+                                if reply['id'] not in existing_reply_ids:
+                                    reply_snippet = reply['snippet']
+                                    comments.append({
+                                        'level': 1,
+                                        'author': reply_snippet['authorDisplayName'],
+                                        'comment': reply_snippet['textDisplay'],
+                                        'like_count': reply_snippet['likeCount'],
+                                        'published_at': reply_snippet['publishedAt'],
+                                        'updated_at': reply_snippet['updatedAt'],
+                                        'parent_id': item['snippet']['topLevelComment']['id'],
+                                        'comment_id': reply['id']
+                                    })
+                            
+                            # Handle pagination for replies if needed
+                            while 'nextPageToken' in replies_response:
+                                replies_request = youtube.comments().list(
+                                    part='snippet',
+                                    parentId=item['snippet']['topLevelComment']['id'],
+                                    maxResults=100,
+                                    pageToken=replies_response['nextPageToken']
+                                )
+                                replies_response = replies_request.execute()
+                                
+                                for reply in replies_response['items']:
+                                    reply_snippet = reply['snippet']
+                                    comments.append({
+                                        'level': 1,
+                                        'author': reply_snippet['authorDisplayName'],
+                                        'comment': reply_snippet['textDisplay'],
+                                        'like_count': reply_snippet['likeCount'],
+                                        'published_at': reply_snippet['publishedAt'],
+                                        'updated_at': reply_snippet['updatedAt'],
+                                        'parent_id': item['snippet']['topLevelComment']['id'],
+                                        'comment_id': reply['id']
+                                    })
+                        except HttpError as reply_error:
+                            print(f"Warning: Could not fetch all replies for comment {item['snippet']['topLevelComment']['id']}: {reply_error}")
+                            continue
                 
     except HttpError as e:
         print(f"An HTTP error occurred: {e}")
@@ -88,7 +239,7 @@ def save_comments_to_csv(comments, video_id, filename=None):
     
     try:
         with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['author', 'comment', 'like_count', 'published_at', 'updated_at']
+            fieldnames = ['level', 'author', 'comment', 'like_count', 'published_at', 'updated_at', 'parent_id', 'comment_id']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             
             writer.writeheader()
